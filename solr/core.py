@@ -1065,6 +1065,8 @@ class Node(object):
     """
     A temporary object used in XML processing. Not seen by end user.
     """
+    __slots__ = ('chars', 'name', 'attrs', 'final', 'children')
+
     def __init__(self, name, attrs):
         """
         Final will eventually be the "final" representation of
