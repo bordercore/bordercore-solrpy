@@ -252,6 +252,7 @@ from xml.sax import make_parser
 from xml.sax.handler import ContentHandler
 from xml.sax.saxutils import escape, quoteattr
 from xml.dom.minidom import parseString
+import json
 
 __version__ = "0.9.5"
 
@@ -708,10 +709,12 @@ class SolrConnection(Solr):
 
 class SearchHandler(object):
 
-    def __init__(self, conn, relpath="/select", arg_separator="_"):
+    def __init__(self, conn, relpath="/select", arg_separator="_", parse_response=None):
         self.conn = conn
         self.selector = conn.path + relpath
         self.arg_separator = arg_separator
+        # NB: parse_response.wt should be set as appropriate, and parse_response(file_like, params, query) returns a Response object
+        self.parse_response = parse_response or parse_xml_response
 
     def __call__(self, q=None, fields=None, highlight=None,
                  score=True, sort=None, sort_order="asc", **params):
@@ -793,10 +796,10 @@ class SearchHandler(object):
 
         params['fl'] = fields
         params['version'] = self.conn.response_version
-        params['wt'] = 'standard'
+        params['wt'] = self.parse_response.wt
 
-        xml = self.raw(**params)
-        return parse_query_response(StringIO(xml),  params, self)
+        data = self.raw(**params)
+        return self.parse_response(StringIO(data),  params, self)
 
     def raw(self, **params):
         """
@@ -845,15 +848,19 @@ class Response(object):
           results -- a list of matching documents. Each list item will
               be a dict.
     """
-    def __init__(self, query):
+    def __init__(self):
         # These are set in ResponseContentHandler.endElement()
         self.header = {}
         self.results = []
 
-        # These are set by parse_query_response().
+        # These are set by parse_xml_response().
         # Used only if .next_batch()/previous_batch() is called
-        self._query = query
+        self._query = None
         self._params = {}
+
+    def _set_params(self, params, query):
+        self._query = query
+        self._params = params or {}
 
     def _set_numFound(self, value):
         self._numFound = long(value)
@@ -941,9 +948,137 @@ class Response(object):
 
 
 # ===================================================================
-# XML Parsing support
+# JSON parsing support
 # ===================================================================
-def parse_query_response(data, params, query):
+class JSONResponseParser(object):
+    """
+    Solr servers may produce JSON more efficiently than XML; however, it loses some type information.
+    In order to re-parse types, a JSONResponseParser may be constructed with a set of translators: callbacks conditioned on paths of object/array keys/indexes.
+
+    Each translator consists of a path to find values requiring translation, and function returning the translation for each value.
+    Translators are applied in order in separate passes over the decoded object.
+    Each path is a list/tuple where each element is one of:
+    * None to match any object attribute or array index;
+    * a string to match a particular object attribute;
+    * an int to match a particular array index; or
+    * a function which evaluates True given keys to descend.
+
+    For example:
+        translators = [
+            (('response', 'docs', None, 'timestamp'), utc_from_string)
+        ]
+
+    would parse the 'timestamp' fields in a query response into datetime objects.
+
+        translators = [
+            (('response', 'docs', None, re.compile('_dt$').search), utc_from_string)
+        ]
+
+    would parse all fields named '*_dt' into datetime objects.
+    """
+    wt = 'json'
+
+    def __init__(self, translators=[], load_json=json.load):
+        self._translators = [(self.compile_path(path), cb) for path, cb in translators]
+        self._load_json = load_json
+
+    @classmethod
+    def compile_path(cls, path):
+        res = []
+        for component in reversed(path):
+            if component is None:
+                res.append(cls.Wildcard())
+            elif callable(component):
+                res.append(cls.Matcher(component))
+            else:
+                res.append(cls.Attribute(component))
+        return tuple(res)
+
+    class PathComponent(object):
+        list_types = (list, tuple)
+
+        def values(self, obj):
+            for k, v in self.items(obj):
+                yield v
+
+        def items(self, obj):
+            if hasattr(obj, 'items'):
+                return obj.items()
+            elif isinstance(obj, self.list_types):
+                return enumerate(obj)
+            return ()
+
+    class Wildcard(PathComponent):
+        def values(self, obj):
+            if hasattr(obj, 'values'):
+                return obj.values()
+            elif isinstance(obj, self.list_types):
+                return obj
+            return ()
+
+    class Attribute(PathComponent):
+        def __init__(self, val):
+            self.val = val
+
+        def values(self, obj):
+            try:
+                yield obj[self.val]
+            except (KeyError, IndexError, TypeError):
+                return
+
+        def items(self, obj):
+            try:
+                yield self.val, obj[self.val]
+            except (KeyError, IndexError, TypeError):
+                return
+
+    class Matcher(PathComponent):
+        def __init__(self, cb):
+            self.cb = cb
+
+        def items(self, obj):
+            for k, v in JSONResponseParser.PathComponent.items(self, obj):
+                if self.cb(k):
+                    yield k, v
+
+    def _translate(self, objects, cpath, callback):
+        ind = len(cpath) - 1
+        while ind:
+            new_objects = []
+            component = cpath[ind]
+            for obj in objects:
+                new_objects.extend(component.values(obj))
+            objects = new_objects
+            ind -= 1
+        for obj in objects:
+            for key, val in cpath[ind].items(obj):
+                obj[key] = callback(val)
+
+    def translate(self, *objects):
+        for translator in self._translators:
+            self._translate(objects, *translator)
+
+    def __call__(self, data, params=None, query=None):
+        obj = self._load_json(data)
+        self.translate(obj)
+        if not obj:
+            return
+        response = Response()
+        response._set_params(params, query)
+        response.header = obj.pop('responseHeader', None)
+        result_data = obj.pop('response', {})
+        response.results = result_data.pop('docs', [])
+        # note cannot use response.__dict__.update due to use of property in Response
+        for k, v in result_data.items():
+            if k != 'name':
+                setattr(response, k, v)
+        return response
+
+
+# ===================================================================
+# xml parsing support
+# ===================================================================
+def parse_xml_response(data, params, query):
     """
     Parse the XML results of a /select call.
     """
@@ -953,11 +1088,11 @@ def parse_query_response(data, params, query):
     parser.parse(data)
     if handler.stack[0].children:
         response = handler.stack[0].children[0].final
-        response._params = params
-        response._query = query
+        response._set_params(params, query)
         return response
     else:
         return None
+parse_xml_response.wt = 'standard'
 
 
 class ResponseContentHandler(ContentHandler):
@@ -1016,7 +1151,7 @@ class ResponseContentHandler(ContentHandler):
             node.final = float(value.strip())
 
         elif name == 'response':
-            node.final = response = Response(self)
+            node.final = response = Response()
             for child in node.children:
                 name = child.attrs.get('name', child.name)
                 if name == 'responseHeader':
