@@ -11,10 +11,10 @@ class TestJSONResponseParser(unittest.TestCase):
     data = r'''{"responseHeader":{"status":0,"QTime":0,"params":{"q":"text:\"world\"","wt":"json","rows":"1000"}},"response":{"numFound":2,"start":0,"docs":[{"text":"hello world","timestamp":"2012-02-22T00:00:01Z","id":"someid","hits":513},{"text":"farewell world","timestamp":"2012-02-23T00:00:01Z","id":"otherid","hits":111}]}}'''
     expected_header = {u'status': 0, u'QTime': 0, u'params': {u'q': u'text:"world"', u'wt': u'json', u'rows': u'1000'}}
 
-    def _get_response(self, parser):
+    def _get_response(self, parser, data=data):
         params = object()
         query = object()
-        resp = parser(StringIO(self.data), params, query)
+        resp = parser(StringIO(data), params, query)
         self.assertIs(resp._query, query)
         self.assertIs(resp._params, params)
         self.assertEquals(resp.header, self.expected_header)
@@ -68,6 +68,11 @@ class TestJSONResponseParser(unittest.TestCase):
         self.assertDictEqual(resp.results[1], {"text":13,"timestamp":"2012-02-23T00:00:01Z","id":"otherid","hits":111})
         self.assertRaises(TypeError, self._get_response, solr.core.JSONResponseParser([t2, t1]))
 
+    def test_additional_keys(self):
+        data = self.data[:-1] + ',"termVectors":"some data"}'
+        resp = self._get_response(solr.core.JSONResponseParser(), data)
+        self.assertEquals(resp.termVectors, u'some data')
+
 
 class TestXMLResponseParser(unittest.TestCase):
     data = r'''<?xml version="1.0" encoding="UTF-8"?>
@@ -76,10 +81,10 @@ class TestXMLResponseParser(unittest.TestCase):
 </response>'''
     expected_header = {u'status': 0, u'QTime': 0, u'params': {u'q': u'text:"world"', u'wt': u'standard', u'rows': u'1000'}}
 
-    def _get_response(self, parser):
+    def _get_response(self, parser, data=data):
         params = object()
         query = object()
-        resp = parser(StringIO(self.data), params, query)
+        resp = parser(StringIO(data), params, query)
         self.assertIs(resp._query, query)
         self.assertIs(resp._params, params)
         self.assertEquals(resp.header, self.expected_header)
@@ -94,4 +99,9 @@ class TestXMLResponseParser(unittest.TestCase):
         resp = self._get_response(solr.core.parse_xml_response)
         self.assertDictEqual(resp.results[0], {"text":"hello world","timestamp":datetime.datetime(2012, 02, 22, 0, 0, 1, tzinfo=solr.core.utc),"id":"someid","hits":513})
         self.assertDictEqual(resp.results[1], {"text":"farewell world","timestamp":datetime.datetime(2012, 02, 23, 0, 0, 1, tzinfo=solr.core.utc),"id":"otherid","hits":111})
+
+    def test_additional_keys(self):
+        data = self.data[:self.data.rindex('<')] + '<lst name="termVectors"></lst>' + self.data[self.data.rindex('<'):]
+        resp = self._get_response(solr.core.parse_xml_response, data)
+        self.assertEquals(resp.termVectors, {})
 

@@ -1069,7 +1069,7 @@ class JSONResponseParser(object):
         result_data = obj.pop('response', {})
         response.results = result_data.pop('docs', [])
         # note cannot use response.__dict__.update due to use of property in Response
-        for k, v in result_data.items():
+        for k, v in result_data.items() + obj.items():
             if k != 'name':
                 setattr(response, k, v)
         return response
