@@ -433,6 +433,8 @@ class Solr:
 
         self.debug = debug
         self.select = SearchHandler(self, "/select")
+        self.add = Updater(self).add
+        self.add_many = Updater(self).add_many
 
     def close(self):
         """Close the underlying HTTP(S) connection."""
@@ -440,6 +442,18 @@ class Solr:
 
 
     # Update interface.
+
+    def updater(self, **field_ops):
+        """
+        Create an updater which can modify documents.
+
+        For example, to update document ID 1 by setting its 'price' field to
+        105 and incremending its 'num_updates' field by 1:
+        >>> ops = solr.UpdateOps
+        >>> updater = conn.updater(price=ops.SET, num_updates=opts.INC)
+        >>> updater.add(id=1, price=105, num_updates=1)
+        """
+        return Updater(self, field_ops)
 
     @committing
     def delete(self, id=None, ids=None, queries=None):
@@ -478,40 +492,6 @@ class Solr:
         """
         return self._delete(queries=[query])
 
-    @committing
-    def add(self, doc):
-        """
-        Add a document to the Solr server.  Document fields
-        should be specified as arguments to this function
-
-        Example::
-
-            doc = {"id": "mydoc", "author": "Me"}
-            connection.add(doc)
-
-        Supports commit-control arguments.
-        """
-        lst = [u'<add>']
-        self.__add(lst, doc)
-        lst.append(u'</add>')
-        return ''.join(lst)
-
-    @committing
-    def add_many(self, docs):
-        """
-        Add several documents to the Solr server.
-
-        `docs`
-            An iterable of document dictionaries.
-
-        Supports commit-control arguments.
-        """
-        lst = [u'<add>']
-        for doc in docs:
-            self.__add(lst, doc)
-        lst.append(u'</add>')
-        return ''.join(lst)
-
     def commit(self, wait_flush=True, wait_searcher=True, _optimize=False):
         """
         Issue a commit command to the Solr server.
@@ -547,12 +527,7 @@ class Solr:
 
     def _update(self, request, query=None):
         selector = '%s/update%s' % (self.path, qs_from_items(query))
-        try:
-            rsp = self._post(selector, request, self.xmlheaders)
-            data = rsp.read()
-        finally:
-            if not self.persistent:
-                self.close()
+        rsp, data = self._post(selector, request, self.xmlheaders)
 
         # Detect old-style error response (HTTP response code
         # of 200 with a non-zero status).
@@ -565,35 +540,6 @@ class Solr:
                 reason = parsed.documentElement.firstChild.nodeValue
                 raise SolrException(rsp.status, reason)
         return data
-
-    def __add(self, lst, fields):
-        lst.append(u'<doc>')
-        for field, value in fields.items():
-            # Handle multi-valued fields if values
-            # is passed in as a list/tuple
-            if not isinstance(value, (list, tuple, set)):
-                values = [value]
-            else:
-                values = value
-
-            for value in values:
-                # ignore values that are not defined
-                if value == None:
-                    continue
-                # Do some basic data conversion
-                if isinstance(value, datetime.datetime):
-                    value = utc_to_string(value)
-                elif isinstance(value, datetime.date):
-                    value = datetime.datetime.combine(
-                        value, datetime.time(tzinfo=UTC()))
-                    value = utc_to_string(value)
-                elif isinstance(value, bool):
-                    value = value and 'true' or 'false'
-
-                lst.append('<field name=%s>%s</field>' % (
-                    (quoteattr(field),
-                    escape(unicode(value)))))
-        lst.append('</doc>')
 
     def _delete(self, id=None, ids=None, queries=None):
         """
@@ -631,23 +577,34 @@ class Solr:
                 self.conn.sock.sock.settimeout(self.timeout)
 
     def _post(self, url, body, headers):
-        _headers = self.auth_headers.copy()
-        _headers.update(headers)
-        attempts = self.max_retries + 1
-        while attempts > 0:
-            try:
-                self.conn.request('POST', url, body.encode('UTF-8'), _headers)
-                return check_response_status(self.conn.getresponse())
-            except (socket.error,
-                    httplib.ImproperConnectionState,
-                    httplib.BadStatusLine):
-                    # We include BadStatusLine as they are spurious
-                    # and may randomly happen on an otherwise fine
-                    # Solr connection (though not often)
-                self._reconnect()
-                attempts -= 1
-                if attempts <= 0:
-                    raise
+        if self.debug:
+            logging.info("solrpy request: %s" % body)
+
+        try:
+            _headers = self.auth_headers.copy()
+            _headers.update(headers)
+            attempts = self.max_retries + 1
+            while attempts > 0:
+                try:
+                    self.conn.request('POST', url, body.encode('UTF-8'), _headers)
+                    rsp = check_response_status(self.conn.getresponse())
+                    data = rsp.read()
+                    if self.debug:
+                        logging.info("solrpy got response: %s" % data)
+                    return rsp, data
+                except (socket.error,
+                        httplib.ImproperConnectionState,
+                        httplib.BadStatusLine):
+                        # We include BadStatusLine as they are spurious
+                        # and may randomly happen on an otherwise fine
+                        # Solr connection (though not often)
+                    self._reconnect()
+                    attempts -= 1
+                    if attempts <= 0:
+                        raise
+        finally:
+            if not self.persistent:
+                self.close()
 
 
 class SolrConnection(Solr):
@@ -705,6 +662,92 @@ class SolrConnection(Solr):
 
     def raw_query(self, **params):
         return self.select.raw(**params)
+
+
+class UpdateOps(object):
+    SET = 'set'
+    INC = INCREMENT = 'inc'
+    ADD = APPEND = 'add'
+
+
+class Updater(object):
+    class FieldFormatter(dict):
+        def set_updater(self, name, op):
+            self[name] = ('<field name=%s update=%s>%%s</field>' %
+                    (quoteattr(name), quoteattr(op))).__mod__
+
+        def __getitem__(self, name):
+            try:
+                return dict.__getitem__(self, name)
+            except KeyError:
+                # Default
+                return ('<field name=%s>%%s</field>' % quoteattr(name)).__mod__
+
+    def __init__(self, conn, field_ops={}):
+        self.conn = conn
+        self._update = conn._update
+        self.field_formatters = self.__class__.FieldFormatter()
+        for name, op in field_ops.items():
+            self.field_formatters.set_updater(name, op)
+
+    def add(self, doc):
+        """
+        Add a document to the Solr server.  Document fields
+        should be specified as arguments to this function
+
+        Example::
+
+            doc = {"id": "mydoc", "author": "Me"}
+            connection.add(doc)
+
+        Supports commit-control arguments.
+        """
+        return self.add_many((doc,))
+
+    @committing
+    def add_many(self, docs):
+        """
+        Add several documents to the Solr server.
+
+        `docs`
+            An iterable of document dictionaries.
+
+        Supports commit-control arguments.
+        """
+        lst = [u'<add>']
+        for doc in docs:
+            self.__add(lst, doc)
+        lst.append(u'</add>')
+        return ''.join(lst)
+
+    @committing
+    def __add(self, lst, fields):
+        lst.append(u'<doc>')
+        for field, value in fields.items():
+            # Handle multi-valued fields if values
+            # is passed in as a list/tuple
+            if not isinstance(value, (list, tuple, set)):
+                values = [value]
+            else:
+                values = value
+
+            for value in values:
+                # ignore values that are not defined
+                if value == None:
+                    continue
+                # Do some basic data conversion
+                if isinstance(value, datetime.datetime):
+                    value = utc_to_string(value)
+                elif isinstance(value, datetime.date):
+                    value = datetime.datetime.combine(
+                        value, datetime.time(tzinfo=UTC()))
+                    value = utc_to_string(value)
+                elif isinstance(value, bool):
+                    value = value and 'true' or 'false'
+
+                lst.append(self.field_formatters[field](escape(unicode(value))))
+        lst.append('</doc>')
+
 
 
 class SearchHandler(object):
@@ -818,19 +861,7 @@ class SearchHandler(object):
             else:
                 query.append((key, to_str(value)))
         request = urllib.urlencode(query, doseq=True)
-        conn = self.conn
-        if conn.debug:
-            logging.info("solrpy request: %s" % request)
-
-        try:
-            rsp = conn._post(self.selector, request, conn.form_headers)
-            data = rsp.read()
-            if conn.debug:
-                logging.info("solrpy got response: %s" % data)
-        finally:
-            if not conn.persistent:
-                conn.close()
-
+        rsp, data = self.conn._post(self.selector, request, self.conn.form_headers)
         return data
 
 
