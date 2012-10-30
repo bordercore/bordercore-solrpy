@@ -252,7 +252,6 @@ from xml.sax import make_parser
 from xml.sax.handler import ContentHandler
 from xml.sax.saxutils import escape, quoteattr
 from xml.dom.minidom import parseString
-import json
 
 __version__ = "0.9.5"
 
@@ -1009,8 +1008,11 @@ class JSONResponseParser(object):
     """
     wt = 'json'
 
-    def __init__(self, translators=[], load_json=json.load):
+    def __init__(self, translators=[], load_json=None):
         self._translators = [(self.compile_path(path), cb) for path, cb in translators]
+        if load_json is None:
+            import json
+            load_json = json.load
         self._load_json = load_json
 
     @classmethod
