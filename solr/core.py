@@ -252,6 +252,7 @@ from xml.sax import make_parser
 from xml.sax.handler import ContentHandler
 from xml.sax.saxutils import escape, quoteattr
 from xml.dom.minidom import parseString
+from util import MultiValueDict
 
 __version__ = "0.9.5"
 
@@ -1198,9 +1199,13 @@ class ResponseContentHandler(ContentHandler):
 
                 setattr(response, name, child.final)
 
-        elif name in ('lst','doc'):
-            # Represent these with a dict
+        elif name == 'doc':
             node.final = dict(
+                    [(cnode.attrs['name'], cnode.final)
+                        for cnode in node.children])
+
+        elif name == 'lst':
+            node.final = MultiValueDict(
                     [(cnode.attrs['name'], cnode.final)
                         for cnode in node.children])
 

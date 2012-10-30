@@ -1,5 +1,6 @@
 
 from solr.core import JSONResponseParser, SearchHandler
+from solr.util import MultiValueDict
 
 __all__ = ['TermVectorHandler']
 
@@ -29,7 +30,7 @@ def _parse_named_list(data):
         yield k, v
 
 
-def named_list_to_dict(data):
+def named_list_to_dict(data, constr=dict):
     return dict(_parse_named_list(data))
 
 
@@ -38,8 +39,13 @@ def parse_term_vector_data(data):
     for k, v in _parse_named_list(data):
         if k == 'tf-idf':
             k = 'tf_idf'
+        if k == 'positions':
+            # e.g. ["position", 1, "position", 2] -> [1, 2]
+            v = [pv for pk, pv in _parse_named_list(v)]
         if k == 'offsets':
-            v = slice(v[1], v[3])
+            # e.g. ["start", 1, "end", 2, "start", 3, "end", 4] -> [(1, 2), (3, 4)]
+            offsets = MultiValueDict(v)
+            v = zip(offsets.poplist('start'), offsets.poplist('end'))
         res[k] = v
     return TermData(**res)
 
