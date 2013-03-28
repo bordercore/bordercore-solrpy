@@ -1,6 +1,6 @@
 
 from solr.core import JSONResponseParser, SearchHandler
-from solr.util import MultiValueDict
+from solr.util import MultiDict
 
 __all__ = ['TermVectorHandler']
 
@@ -44,7 +44,7 @@ def parse_term_vector_data(data):
             v = [pv for pk, pv in _parse_named_list(v)]
         if k == 'offsets':
             # e.g. ["start", 1, "end", 2, "start", 3, "end", 4] -> [(1, 2), (3, 4)]
-            offsets = MultiValueDict(v)
+            offsets = MultiDict(v)
             v = zip(offsets.poplist('start'), offsets.poplist('end'))
         res[k] = v
     return TermData(**res)
