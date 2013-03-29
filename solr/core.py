@@ -586,7 +586,7 @@ class Solr:
             attempts = self.max_retries + 1
             while attempts > 0:
                 try:
-                    self.conn.request('POST', url, body.encode('UTF-8'), _headers)
+                    self.conn.request('POST', url, body.encode('UTF-8').replace('%2B', '+'), _headers)
                     rsp = check_response_status(self.conn.getresponse())
                     data = rsp.read()
                     if self.debug:
