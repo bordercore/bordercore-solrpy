@@ -1,6 +1,6 @@
 
-from solr.core import JSONResponseParser, SearchHandler
-from solr.util import MultiDict
+from solrpy.core import JSONResponseParser, SearchHandler
+from solrpy.util import MultiDict
 
 __all__ = ['TermVectorHandler']
 
